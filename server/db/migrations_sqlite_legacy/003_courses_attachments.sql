@@ -1,0 +1,2 @@
+-- Add attachment columns to courses table (ignore if already exists)
+-- SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we'll handle this in the migration runner

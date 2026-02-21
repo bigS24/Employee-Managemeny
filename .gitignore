@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-electron
+out
+release
+*.log
+.env
+*.db
+*.sqlite
+.DS_Store
+.idea
+.vscode
+.trae
+build

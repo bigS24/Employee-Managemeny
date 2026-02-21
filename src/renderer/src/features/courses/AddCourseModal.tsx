@@ -1,0 +1,194 @@
+import React, { useState, useEffect } from 'react'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../../components/ui/dialog'
+import { Button } from '../../components/ui/Button'
+import InputText from '../../components/form/InputText'
+import InputNumber from '../../components/form/InputNumber'
+import { courseSchema } from '../../schemas/validation'
+import { toast } from 'sonner'
+import dayjs from 'dayjs'
+
+interface AddCourseModalProps {
+  open: boolean
+  onClose: () => void
+  onSuccess: () => void
+}
+
+export function AddCourseModal({ open, onClose, onSuccess }: AddCourseModalProps) {
+  const [loading, setLoading] = useState(false)
+  const [employees, setEmployees] = useState<any[]>([])
+  const [form, setForm] = useState({
+    employee_id: '',
+    course_name: '',
+    provider: '',
+    start_date: dayjs().format('YYYY-MM-DD'),
+    end_date: dayjs().format('YYYY-MM-DD'),
+    duration_hours: '',
+    cost: '',
+    status: 'planned',
+    notes: ''
+  })
+
+  useEffect(() => {
+    if (open) {
+      // Load employees
+      window.api.getEmployees().then(setEmployees).catch(console.error)
+    }
+  }, [open])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      setLoading(true)
+      const parsed = courseSchema.parse(form)
+      
+      await window.api.createCourse(parsed)
+      
+      toast.success('تم إضافة الدورة بنجاح')
+      onSuccess()
+      onClose()
+      
+      // Reset form
+      setForm({
+        employee_id: '',
+        course_name: '',
+        provider: '',
+        start_date: dayjs().format('YYYY-MM-DD'),
+        end_date: dayjs().format('YYYY-MM-DD'),
+        duration_hours: '',
+        cost: '',
+        status: 'planned',
+        notes: ''
+      })
+    } catch (error: any) {
+      console.error(error)
+      toast.error('البيانات غير صحيحة')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onClose}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>إضافة دورة تدريبية جديدة</DialogTitle>
+          <DialogDescription>
+            أدخل بيانات الدورة التدريبية الجديدة في النموذج أدناه
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">الموظف *</label>
+              <select
+                value={form.employee_id}
+                onChange={(e) => setForm(p => ({ ...p, employee_id: e.target.value }))}
+                className="input input-bordered w-full"
+              >
+                <option value="">اختر الموظف</option>
+                {employees.map((emp) => (
+                  <option key={emp.id} value={emp.id.toString()}>
+                    {emp.full_name} - {emp.employee_no}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">اسم الدورة *</label>
+              <InputText
+                value={form.course_name}
+                onChange={(v) => setForm(p => ({ ...p, course_name: v }))}
+                placeholder="أدخل اسم الدورة"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">مقدم الدورة *</label>
+              <InputText
+                value={form.provider}
+                onChange={(v) => setForm(p => ({ ...p, provider: v }))}
+                placeholder="أدخل اسم مقدم الدورة"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">عدد الساعات *</label>
+              <InputNumber
+                value={form.duration_hours}
+                onChange={(v) => setForm(p => ({ ...p, duration_hours: v }))}
+                placeholder="أدخل عدد الساعات"
+                min="1"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">تاريخ البداية *</label>
+              <input
+                type="date"
+                value={form.start_date}
+                onChange={(e) => setForm(p => ({ ...p, start_date: e.target.value }))}
+                className="input input-bordered w-full"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">تاريخ النهاية *</label>
+              <input
+                type="date"
+                value={form.end_date}
+                onChange={(e) => setForm(p => ({ ...p, end_date: e.target.value }))}
+                className="input input-bordered w-full"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">التكلفة</label>
+              <InputNumber
+                value={form.cost}
+                onChange={(v) => setForm(p => ({ ...p, cost: v }))}
+                placeholder="أدخل التكلفة"
+                min="0"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">الحالة</label>
+              <select
+                value={form.status}
+                onChange={(e) => setForm(p => ({ ...p, status: e.target.value }))}
+                className="input input-bordered w-full"
+              >
+                <option value="planned">مخطط</option>
+                <option value="ongoing">جاري</option>
+                <option value="completed">مكتمل</option>
+                <option value="cancelled">ملغي</option>
+              </select>
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium mb-2">ملاحظات</label>
+              <textarea
+                value={form.notes}
+                onChange={(e) => setForm(p => ({ ...p, notes: e.target.value }))}
+                placeholder="أدخل ملاحظات إضافية"
+                className="textarea textarea-bordered w-full"
+                rows={3}
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-4">
+            <Button type="button" variant="outline" onClick={onClose}>
+              إلغاء
+            </Button>
+            <Button type="submit" disabled={loading}>
+              {loading ? 'جاري الحفظ...' : 'إضافة الدورة'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}

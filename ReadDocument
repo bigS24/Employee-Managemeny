@@ -1,0 +1,269 @@
+“Finish Payroll page (calc = Excel, save, edit, status, totals, export)”
+
+Objective
+Make the Payroll page production-ready. For each employee & month we must:
+
+Calculate with the same formula as the Excel sheet (Base + Allowances → مجموع, + EOS + Exceptional → إجمالي, + OT − Deductions → صافي).
+
+Save a USD-authoritative snapshot and TRY snapshot at the active rate.
+
+Edit and re-calculate live, then save.
+
+Maintain status (مسودّة/قيد المراجعة/معالج/ملغي).
+
+Show month totals and export to Excel (Downloads folder).
+
+1) Calculation kernel (reuse across import & UI)
+
+Create/verify /src/main/payroll/calc.ts:
+
+export type PayrollInputs = {
+  base_salary_usd: number,
+  admin_allowance_usd?: number, education_allowance_usd?: number,
+  housing_allowance_usd?: number, transport_allowance_usd?: number,
+  col_allowance_usd?: number, children_allowance_usd?: number,
+  special_allowance_usd?: number, fuel_allowance_usd?: number,
+  eos_accrual_usd?: number, exceptional_additions_usd?: number,
+  overtime_hours?: number, hours_per_day?: number, days_per_month?: number, overtime_multiplier?: number,
+  deduction_loan_penalty_usd?: number, deduction_payment_usd?: number, deductions_other_usd?: number,
+};
+
+export function computePayrollUSD(i: PayrollInputs) {
+  const hours = i.hours_per_day ?? 8;
+  const days  = i.days_per_month ?? 30;
+  const otMul = i.overtime_multiplier ?? 1.25;
+
+  const base = +i.base_salary_usd || 0;
+  const alw  =
+    (+i.admin_allowance_usd||0)+(+i.education_allowance_usd||0)+
+    (+i.housing_allowance_usd||0)+(+i.transport_allowance_usd||0)+
+    (+i.col_allowance_usd||0)+(+i.children_allowance_usd||0)+
+    (+i.special_allowance_usd||0)+(+i.fuel_allowance_usd||0);
+
+  const eos   = +i.eos_accrual_usd || 0;
+  const exAdd = +i.exceptional_additions_usd || 0;
+
+  const salary_sum_usd   = base + alw;              // مجموع الراتب
+  const salary_total_usd = salary_sum_usd + eos + exAdd; // إجمالي الراتب
+
+  const daily_rate_usd  = base / days;
+  const hourly_rate_usd = daily_rate_usd / hours;
+
+  const overtime_value_usd = (+i.overtime_hours||0) * hourly_rate_usd * otMul;
+
+  const deductions_usd =
+    (+i.deduction_loan_penalty_usd||0) +
+    (+i.deduction_payment_usd||0) +
+    (+i.deductions_other_usd||0);
+
+  const net_salary_usd = salary_total_usd + overtime_value_usd - deductions_usd;
+
+  return { base, alw, eos, exAdd,
+    salary_sum_usd, salary_total_usd,
+    daily_rate_usd, hourly_rate_usd, overtime_value_usd,
+    deductions_usd, net_salary_usd
+  };
+}
+
+export function withTRY(usd: ReturnType<typeof computePayrollUSD>, rate: number) {
+  const fx = (n:number)=> +(n*rate).toFixed(2);
+  return {
+    ...usd, rate_used: rate,
+    salary_sum_try: fx(usd.salary_sum_usd),
+    salary_total_try: fx(usd.salary_total_usd),
+    daily_rate_try: fx(usd.daily_rate_usd),
+    hourly_rate_try: fx(usd.hourly_rate_usd),
+    overtime_value_try: fx(usd.overtime_value_usd),
+    deductions_try: fx(usd.deductions_usd),
+    net_salary_try: fx(usd.net_salary_usd),
+  };
+}
+
+2) Database (snapshots)
+
+Ensure table exists:
+
+CREATE TABLE IF NOT EXISTS payroll_snapshots (
+  id INTEGER PRIMARY KEY,
+  employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  month TEXT NOT NULL,                 -- 'YYYY-MM'
+  status TEXT NOT NULL DEFAULT 'مسودّة', -- مسودّة | قيد المراجعة | معالج | ملغي
+
+  -- inputs (USD)
+  base_salary_usd REAL NOT NULL,
+  admin_allowance_usd REAL DEFAULT 0, education_allowance_usd REAL DEFAULT 0,
+  housing_allowance_usd REAL DEFAULT 0, transport_allowance_usd REAL DEFAULT 0,
+  col_allowance_usd REAL DEFAULT 0, children_allowance_usd REAL DEFAULT 0,
+  special_allowance_usd REAL DEFAULT 0, fuel_allowance_usd REAL DEFAULT 0,
+  eos_accrual_usd REAL DEFAULT 0, exceptional_additions_usd REAL DEFAULT 0,
+  overtime_hours REAL DEFAULT 0,
+  deduction_loan_penalty_usd REAL DEFAULT 0,
+  deduction_payment_usd REAL DEFAULT 0,
+  deductions_other_usd REAL DEFAULT 0,
+
+  -- computed USD
+  salary_sum_usd REAL, salary_total_usd REAL,
+  daily_rate_usd REAL, hourly_rate_usd REAL,
+  overtime_value_usd REAL, deductions_usd REAL, net_salary_usd REAL,
+
+  -- TRY snapshot
+  rate_used REAL, salary_sum_try REAL, salary_total_try REAL,
+  daily_rate_try REAL, hourly_rate_try REAL,
+  overtime_value_try REAL, deductions_try REAL, net_salary_try REAL,
+
+  audit_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(employee_id, month)
+);
+
+
+Repo /src/db/repositories/payrollRepo.ts:
+
+findByEmployeeMonth(emp:number, month:string){ return db.prepare(
+  'SELECT * FROM payroll_snapshots WHERE employee_id=? AND month=?'
+).get(emp, month); }
+
+upsert(emp:number, month:string, status:string, inputs:any, usd:any, tr:any, rate:number, audit:any){
+  const sql = `
+  INSERT INTO payroll_snapshots (
+    employee_id, month, status,
+    base_salary_usd, admin_allowance_usd, education_allowance_usd,
+    housing_allowance_usd, transport_allowance_usd, col_allowance_usd, children_allowance_usd,
+    special_allowance_usd, fuel_allowance_usd, eos_accrual_usd, exceptional_additions_usd,
+    overtime_hours, deduction_loan_penalty_usd, deduction_payment_usd, deductions_other_usd,
+    salary_sum_usd, salary_total_usd, daily_rate_usd, hourly_rate_usd, overtime_value_usd, deductions_usd, net_salary_usd,
+    rate_used, salary_sum_try, salary_total_try, daily_rate_try, hourly_rate_try, overtime_value_try, deductions_try, net_salary_try,
+    audit_json, updated_at
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,json(?),datetime('now'))
+  ON CONFLICT(employee_id, month) DO UPDATE SET
+    status=excluded.status,
+    base_salary_usd=excluded.base_salary_usd,
+    admin_allowance_usd=excluded.admin_allowance_usd, education_allowance_usd=excluded.education_allowance_usd,
+    housing_allowance_usd=excluded.housing_allowance_usd, transport_allowance_usd=excluded.transport_allowance_usd,
+    col_allowance_usd=excluded.col_allowance_usd, children_allowance_usd=excluded.children_allowance_usd,
+    special_allowance_usd=excluded.special_allowance_usd, fuel_allowance_usd=excluded.fuel_allowance_usd,
+    eos_accrual_usd=excluded.eos_accrual_usd, exceptional_additions_usd=excluded.exceptional_additions_usd,
+    overtime_hours=excluded.overtime_hours,
+    deduction_loan_penalty_usd=excluded.deduction_loan_penalty_usd,
+    deduction_payment_usd=excluded.deduction_payment_usd,
+    deductions_other_usd=excluded.deductions_other_usd,
+    salary_sum_usd=excluded.salary_sum_usd, salary_total_usd=excluded.salary_total_usd,
+    daily_rate_usd=excluded.daily_rate_usd, hourly_rate_usd=excluded.hourly_rate_usd,
+    overtime_value_usd=excluded.overtime_value_usd, deductions_usd=excluded.deductions_usd, net_salary_usd=excluded.net_salary_usd,
+    rate_used=excluded.rate_used, salary_sum_try=excluded.salary_sum_try, salary_total_try=excluded.salary_total_try,
+    daily_rate_try=excluded.daily_rate_try, hourly_rate_try=excluded.hourly_rate_try,
+    overtime_value_try=excluded.overtime_value_try, deductions_try=excluded.deductions_try, net_salary_try=excluded.net_salary_try,
+    audit_json=excluded.audit_json, updated_at=datetime('now')
+  `;
+  const runInputs = [
+    emp, month, status,
+    inputs.base_salary_usd, inputs.admin_allowance_usd, inputs.education_allowance_usd,
+    inputs.housing_allowance_usd, inputs.transport_allowance_usd, inputs.col_allowance_usd, inputs.children_allowance_usd,
+    inputs.special_allowance_usd, inputs.fuel_allowance_usd, inputs.eos_accrual_usd, inputs.exceptional_additions_usd,
+    inputs.overtime_hours, inputs.deduction_loan_penalty_usd, inputs.deduction_payment_usd, inputs.deductions_other_usd,
+    usd.salary_sum_usd, usd.salary_total_usd, usd.daily_rate_usd, usd.hourly_rate_usd, usd.overtime_value_usd, usd.deductions_usd, usd.net_salary_usd,
+    rate, tr.salary_sum_try, tr.salary_total_try, tr.daily_rate_try, tr.hourly_rate_try, tr.overtime_value_try, tr.deductions_try, tr.net_salary_try,
+    JSON.stringify(audit)
+  ];
+  const info = db.prepare(sql).run(...runInputs);
+  return db.prepare('SELECT * FROM payroll_snapshots WHERE employee_id=? AND month=?').get(emp, month);
+}
+
+listByMonth(month:string){
+  return db.prepare(`SELECT ps.*, e.full_name, e.employee_no, e.department, e.job_title
+                     FROM payroll_snapshots ps JOIN employees e ON e.id=ps.employee_id
+                     WHERE ps.month=? ORDER BY e.full_name`).all(month);
+}
+
+updateStatus(id:number, status:string){
+  return db.prepare('UPDATE payroll_snapshots SET status=?, updated_at=datetime("now") WHERE id=?').run(status, id);
+}
+
+remove(id:number){ return db.prepare('DELETE FROM payroll_snapshots WHERE id=?').run(id); }
+
+3) IPC & preload
+
+/src/main/ipc/payroll.ts:
+
+ipcMain.handle('payroll:calcPreview', (_e, { inputs }) => {
+  const rate = repos.fx.getActiveRate();            // implement if not there
+  const usd  = computePayrollUSD(inputs);
+  const tr   = withTRY(usd, rate);
+  return { usd, tr, rate };
+});
+
+ipcMain.handle('payroll:save', (_e, { employee_id, month, status, inputs }) => {
+  const rate = repos.fx.getActiveRate();
+  const usd  = computePayrollUSD(inputs);
+  const tr   = withTRY(usd, rate);
+  const audit = { inputs, rate, ts: Date.now() };
+  return repos.payroll.upsert(employee_id, month, status ?? 'قيد المراجعة', inputs, usd, tr, rate, audit);
+});
+
+ipcMain.handle('payroll:listByMonth', (_e, { month }) => repos.payroll.listByMonth(month));
+ipcMain.handle('payroll:updateStatus', (_e, { id, status }) => repos.payroll.updateStatus(id, status));
+ipcMain.handle('payroll:delete', (_e, { id }) => repos.payroll.remove(id));
+
+
+Expose in /src/preload/index.ts:
+
+contextBridge.exposeInMainWorld('api', {
+  calcPayrollPreview: (inputs)=>ipcRenderer.invoke('payroll:calcPreview',{inputs}),
+  savePayroll: (employee_id,month,status,inputs)=>ipcRenderer.invoke('payroll:save',{employee_id,month,status,inputs}),
+  listPayrollByMonth: (month)=>ipcRenderer.invoke('payroll:listByMonth',{month}),
+  updatePayrollStatus: (id,status)=>ipcRenderer.invoke('payroll:updateStatus',{id,status}),
+  deletePayroll: (id)=>ipcRenderer.invoke('payroll:delete',{id}),
+});
+
+4) Renderer – Payroll page behaviors
+
+Month filter defaults to current YYYY-MM. On change → listPayrollByMonth(month).
+
+Add / Edit drawer:
+
+All inputs stored as strings while typing.
+
+On change → call calcPayrollPreview debounced (e.g., 250ms) and show live totals (USD & TRY + exchange rate line).
+
+On Save → parse with Zod (same schema you used earlier) and call savePayroll(employeeId, month, status, inputs).
+
+After save → close drawer, refresh grid, toast success.
+
+Status actions in row:
+
+✅ اعتماد → updatePayrollStatus(id, 'معالج')
+
+⭕ رفض/إلغاء → updatePayrollStatus(id, 'ملغي')
+
+📝 تعديل → open drawer with current values (load snapshot by employee & month if not already in row model).
+
+🗑️ حذف → deletePayroll(id) with confirm; refresh list.
+
+Totals footer (month):
+Sum of net_salary_try and net_salary_usd across rows, and sums for: overtime_value, deductions, exceptional_additions.
+
+Export (Downloads):
+Button “تصدير” calls an IPC that writes payroll_<YYYY-MM>.xlsx to app.getPath('downloads') including inputs + computed columns (USD & TRY) and row status.
+
+5) UX & safety
+
+Disable buttons while loading; guard async with try/finally.
+
+Always display the rate used: تم الحساب بسعر: 1 USD = {rate} TRY.
+
+Don’t mutate stored TRY if the rate changes later; it’s a snapshot.
+
+Ensure table “الإجراءات” uses your ActionsBar so all icons work.
+
+6) Acceptance checklist
+
+Clicking إنشاء كشف راتب opens the form; prefills if you load previous values; live totals match Excel logic.
+
+Saving writes a snapshot; the row appears/updates immediately with صافي and الحالة.
+
+Status buttons work (معالج/قيد المراجعة/ملغي).
+
+Month totals display and match the sum of rows.
+
+Export produces Downloads/payroll_YYYY-MM.xlsx with correct numbers.
