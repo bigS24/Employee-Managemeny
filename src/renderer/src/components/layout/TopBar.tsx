@@ -1,7 +1,7 @@
 import React from 'react'
 import { Bell, Settings, LogOut, User } from 'lucide-react'
 import { Button } from '../ui/Button'
-import { Avatar, AvatarFallback, AvatarImage } from '../ui/Avatar'
+import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar'
 import { CurrencyToggle } from '../CurrencyToggle'
 import {
   DropdownMenu,
