@@ -10,6 +10,7 @@
     "build:electron": "node build-electron.js",
     "watch:electron": "node build-electron.js --watch",
     "build": "npm run build:electron && vite build",
+    "build:renderer": "vite build",
     "build:win": "npm run build && electron-builder --win",
     "build:portable": "npm run build && electron-builder --win portable",
     "preview": "vite preview",
